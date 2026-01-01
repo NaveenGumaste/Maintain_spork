@@ -1,0 +1,81 @@
+name: Auto daily commit - Touch files
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+env:
+  END_DATE: "2026-01-15"
+  FILES: "README.md auto-commits.md" # list files to choose from
+
+jobs:
+  touch-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Abort if past END_DATE
+        run: |
+          TODAY=$(date -u +"%Y-%m-%d")
+          if [ -n "${{ env.END_DATE }}" ] && [[ "$TODAY" > "${{ env.END_DATE }}" ]]; then
+            echo "END_DATE passed. Exiting."
+            exit 0
+          fi
+
+      - name: Configure Git identity
+        run: |
+          NAME="${{ secrets.COMMIT_NAME || github.actor }}"
+          EMAIL="${{ secrets.COMMIT_EMAIL || format('{0}@users.noreply.github.com', github.actor) }}"
+          git config user.name "$NAME"
+          git config user.email "$EMAIL"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Pick files and append safe timestamp
+        run: |
+          set -euo pipefail
+          FILES_LIST=(${{ env.FILES }})
+          DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          for i in {1..4}; do
+            SELECTED=$(printf "%s\n" "${FILES_LIST[@]}" | shuf -n 1)
+            if [ ! -f "$SELECTED" ]; then
+              echo "Warning: $SELECTED not found; creating a lightweight log instead."
+              mkdir -p "$(dirname "$SELECTED")" || true
+              echo "# AUTO-COMMIT created $DATE" > "$SELECTED"
+              git add "$SELECTED"
+              git commit -m "chore(auto): create and touch $SELECTED $DATE" || echo "No changes to commit"
+              continue
+            fi
+            ext="${SELECTED##*.}"
+            case "$ext" in
+              py|sh|yml|yaml|md) echo "# AUTO-COMMIT $DATE" >> "$SELECTED" ;;
+              js|ts|java|c|cpp|h|css) echo "// AUTO-COMMIT $DATE" >> "$SELECTED" ;;
+              json) echo "/* AUTO-COMMIT $DATE */" >> "$SELECTED" ;;
+              html|xml) echo "<!-- AUTO-COMMIT $DATE -->" >> "$SELECTED" ;;
+              *) echo "# AUTO-COMMIT $DATE" >> "$SELECTED" ;; 
+            esac
+            git add "$SELECTED"
+            git commit -m "chore(auto): touch $SELECTED $DATE" || echo "No changes to commit"
+          done
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          for attempt in {1..3}; do
+            if git push origin "HEAD:$BRANCH"; then
+              echo "Push succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "Push failed on attempt $attempt, retrying in 5s..."
+            sleep 5
+          done
+          echo "Push failed after retries"
+          exit 1
